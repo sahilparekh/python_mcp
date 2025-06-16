@@ -114,16 +114,16 @@ async def upload_artifacts_to_gcs(
     artifacts_uploaded: List[str] = []
     error_msg_from_helper: Optional[str] = None
 
-    # Check if BUCKET_NAME is valid before proceeding
+    # Check if GCS_BUCKET_NAME is valid before proceeding
     if not bucket_name or bucket_name == "YOUR_BUCKET_NAME" or bucket_name.strip() == "":
-        log_msg = "GCS_HELPER: BUCKET_NAME is not configured or is invalid. Skipping artifact upload."
+        log_msg = "GCS_HELPER: GCS_BUCKET_NAME is not configured or is invalid. Skipping artifact upload."
         if ctx and hasattr(ctx, 'warning'):
             await ctx.warning(log_msg)
         elif ctx and hasattr(ctx, 'info'): # Fallback if no warning method
             await ctx.info(log_msg)
         else:
             print(f"WARNING: {log_msg}") # Basic print if no ctx or suitable log method
-        return [], "BUCKET_NAME not configured or invalid. Artifacts were not uploaded."
+        return [], "GCS_BUCKET_NAME not configured or invalid. Artifacts were not uploaded."
 
     try:
         if ctx and hasattr(ctx, 'info'):

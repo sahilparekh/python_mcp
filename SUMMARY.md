@@ -119,7 +119,7 @@ The project now uses minimal dependencies:
 ## 📝 Configuration Required
 
 Before using:
-1. **Update bucket name** in `utils.py`: `BUCKET_NAME = "your-actual-bucket-name"`
+1. **Update bucket name** in `utils.py`: `GCS_BUCKET_NAME = "your-actual-bucket-name"`
 2. **Set up GCS authentication** via service account or ADC
 3. **Install dependencies**: `pip install -r requirements.txt`
 

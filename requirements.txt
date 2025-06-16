@@ -1,4 +1,3 @@
-fastmcp
 google-cloud-storage
 # Allowed libraries for code execution
 seaborn
@@ -7,3 +6,5 @@ openpyxl
 python-docx
 reportlab
 matplotlib
+fastapi
+uvicorn[standard]

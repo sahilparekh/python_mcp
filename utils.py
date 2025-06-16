@@ -1,27 +1,26 @@
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
 
-from fastmcp import FastMCP, Context
-import subprocess
-import tempfile
 import os
-from typing import Dict, List, Any
+import logging # Ensure logging is imported
 import asyncio
-import re # For validation
-from dotenv import load_dotenv # For .env file
+import tempfile
+import re
+from typing import Dict, List, Any
+
+from fastapi import FastAPI, HTTPException, Body # For FastAPI
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel # For request/response models if needed
 
 from gcs_helper import upload_artifacts_to_gcs # Import the helper
 
-load_dotenv() # Load environment variables from .env
-
-import logging # Ensure logging is imported
 # Configure basic logging to see INFO level messages
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     handlers=[logging.StreamHandler()])
 
-# Configuration - BUCKET_NAME will now be loaded from .env or environment
-BUCKET_NAME = os.getenv("BUCKET_NAME") 
+# Configuration - GCS_BUCKET_NAME will now be loaded from .env or environment
+GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 
 # --- Centralized Allowed Libraries Configuration ---
 # Root module names for allowed third-party libraries
@@ -34,15 +33,39 @@ ALLOWED_THIRD_PARTY_LIBS_CONFIG = {
     "matplotlib": "matplotlib",
 }
 
-# Create FastMCP server instance
-mcp = FastMCP("Python Code Executor")
+# Create FastAPI server instance
+app = FastAPI(title="Python Code Executor", version="1.0.0")
+
+# --- Utility function to clean markdown code blocks ---
+def clean_code_block(code: str) -> str:
+    """
+    Remove markdown code block demarcation (```python and ```) if present.
+    
+    Args:
+        code: Raw code string that might be wrapped in markdown code blocks
+        
+    Returns:
+        Cleaned code string without markdown demarcation
+    """
+    # Strip whitespace
+    code = code.strip()
+    
+    # Check for code block patterns and remove them
+    if code.startswith('```python') and code.endswith('```'):
+        # Remove ```python at start and ``` at end
+        code = code[9:-3].strip()  # 9 = len('```python')
+    elif code.startswith('```') and code.endswith('```'):
+        # Remove generic ``` at start and end
+        code = code[3:-3].strip()
+    
+    return code
 
 # --- Internal Library Validation Logic ---
-async def _perform_library_validation(code: str, ctx: Context) -> Dict[str, Any]:
+async def _perform_library_validation(code: str) -> Dict[str, Any]:
     """
     Internal logic to validate that the provided code only uses allowed libraries.
     """
-    await ctx.info("Performing library validation")
+    logging.info("Performing library validation")
     
     # These are the *root* modules allowed.
     # Submodules of these are implicitly allowed (e.g., matplotlib.pyplot)
@@ -74,8 +97,6 @@ async def _perform_library_validation(code: str, ctx: Context) -> Dict[str, Any]
         
         is_allowed = root_module_name in all_allowed_roots
 
-        # Removed special handling for google.cloud.storage as it's no longer user-allowed
-
         if is_allowed:
             allowed_imports_details.append({"module": module_name_str})
         else:
@@ -85,7 +106,7 @@ async def _perform_library_validation(code: str, ctx: Context) -> Dict[str, Any]
     validation_message = "All imports appear to be allowed." if is_valid else "Disallowed imports found."
     
     if disallowed_imports_details:
-        await ctx.warning(f"Disallowed imports: {disallowed_imports_details}")
+        logging.warning(f"Disallowed imports: {disallowed_imports_details}")
         
     return {
         "is_valid": is_valid,
@@ -94,55 +115,55 @@ async def _perform_library_validation(code: str, ctx: Context) -> Dict[str, Any]
         "disallowed_imports_found": disallowed_imports_details,
     }
 
-# --- MCP Tool: Execute Python Code ---
-@mcp.tool
-async def execute_python_code(ctx: Context, code: str) -> Dict[str, Any]:
+# --- FastAPI Endpoint: Execute Python Code ---
+class ExecuteCodeRequest(BaseModel):
+    code: str
+
+@app.post("/execute_python_code", summary="Execute Python Code")
+async def execute_python_code(request: ExecuteCodeRequest) -> Dict[str, Any]:
     """
     Executes the provided Python code in an isolated environment.
     Only allows a predefined set of libraries.
     Uploads any generated files (artifacts) to Google Cloud Storage using gcs_helper.
 
     Args:
-        ctx: The MCP Context (injected by FastMCP).
-        code: The Python code string to execute.
+        request: A Pydantic model containing the 'code' string.
         
     Returns:
         A dictionary containing:
         - "output": The standard output from the code execution, or relevant error messages.
         - "artifacts": A list of GCS URIs for any generated files.
     """
-    await ctx.info(f"Received code for execution ({len(code)} chars). Validating libraries...")
+    code = clean_code_block(request.code)
+    logging.info(f"Received code for execution ({len(code)} chars). Validating libraries...")
     
-    validation_result = await _perform_library_validation(code, ctx)
+    validation_result = await _perform_library_validation(code)
     output_message = ""
     artifacts_uploaded: List[str] = []
     
     if not validation_result["is_valid"]:
-        await ctx.error("Code validation failed. Execution aborted.")
+        logging.error("Code validation failed. Execution aborted.")
         output_message = (
             f"ERROR: Code validation failed.\n{validation_result['validation_message']}\n"
             f"Disallowed imports: {validation_result['disallowed_imports_found']}"
         )
-        return {
-            "output": output_message,
-            "artifacts": artifacts_uploaded
-        }
+        # Return a 400 Bad Request error
+        raise HTTPException(status_code=400, detail=output_message)
     
-    await ctx.info("Library validation passed. Proceeding with execution.")
+    logging.info("Library validation passed. Proceeding with execution.")
     
     with tempfile.TemporaryDirectory() as workdir:
-        await ctx.info(f"Created temporary directory: {workdir}")
+        logging.info(f"Created temporary directory: {workdir}")
         script_path = os.path.join(workdir, "script.py")
         
         with open(script_path, "w") as f:
             f.write(code)
-        await ctx.info("Code written to script.py")
+        logging.info("Code written to script.py")
         
-        # Initialize artifacts_uploaded here to ensure it's always a list
         artifacts_uploaded: List[str] = []
 
         try:
-            await ctx.info("Executing Python code...")
+            logging.info("Executing Python code...")
             proc = await asyncio.create_subprocess_exec(
                 "python", script_path,
                 stdout=asyncio.subprocess.PIPE,
@@ -154,39 +175,48 @@ async def execute_python_code(ctx: Context, code: str) -> Dict[str, Any]:
                 stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
                 output_message = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
                 if proc.returncode == 0:
-                    await ctx.info(f"Code execution successful. Output: {output_message[:200]}...")
+                    logging.info(f"Code execution successful. Output: {output_message[:200]}...")
                 else:
-                    await ctx.error(f"Code execution failed with return code {proc.returncode}. Output: {output_message[:200]}...")
+                    logging.error(f"Code execution failed with return code {proc.returncode}. Output: {output_message[:500]}...")
+                    # No HTTPException here as we want to return the output
 
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                if proc.returncode is None: # Check if process is still running
+                    try:
+                        proc.kill()
+                        await proc.wait() # Ensure process is reaped
+                    except ProcessLookupError:
+                        logging.warning("Process already terminated when trying to kill due to timeout.")
                 output_message = "ERROR: Execution timed out after 60 seconds"
-                await ctx.error(output_message)
+                logging.error(output_message)
+                # Consider raising HTTPException for timeout if it's a client error
         
         except FileNotFoundError:
             output_message = "ERROR: Python interpreter not found"
-            await ctx.error(output_message)
+            logging.error(output_message)
+            raise HTTPException(status_code=500, detail=output_message) # Server-side issue
         except Exception as e:
             output_message = f"ERROR: An unexpected error occurred during execution: {str(e)}"
-            await ctx.error(output_message)
+            logging.error(output_message, exc_info=True) # Log full traceback
+            raise HTTPException(status_code=500, detail=output_message) # Server-side issue
 
         # Upload artifacts if execution was at least attempted
         upload_error_message = None
         
-        if BUCKET_NAME and BUCKET_NAME != "YOUR_BUCKET_NAME":
+        if GCS_BUCKET_NAME and GCS_BUCKET_NAME != "YOUR_BUCKET_NAME":
             uploaded_uris, error_from_helper = await upload_artifacts_to_gcs(
                 workdir=workdir,
-                bucket_name=BUCKET_NAME,
-                ctx=ctx
+                bucket_name=GCS_BUCKET_NAME,
+                ctx=None  # gcs_helper supports None for ctx
             )
             artifacts_uploaded.extend(uploaded_uris)
             if error_from_helper:
                 upload_error_message = error_from_helper
                 output_message += f"\n[ARTIFACT UPLOAD WARNING]: {upload_error_message}"
+                logging.warning(f"Artifact upload warning: {upload_error_message}")
         else:
-            warning_msg = "BUCKET_NAME is not configured in environment. Skipping artifact upload."
-            await ctx.warning(warning_msg)
+            warning_msg = "GCS_BUCKET_NAME is not configured in environment. Skipping artifact upload."
+            logging.warning(warning_msg)
             output_message += f"\n[ARTIFACT UPLOAD WARNING]: {warning_msg}"
 
     return {
@@ -194,9 +224,9 @@ async def execute_python_code(ctx: Context, code: str) -> Dict[str, Any]:
         "artifacts": artifacts_uploaded
     }
 
-# --- MCP Resource: Allowed Libraries and Versions ---
-@mcp.resource("docs://allowed-libraries-versions")
-def get_allowed_libraries_versions_docs():
+# --- FastAPI Endpoint: Allowed Libraries and Versions ---
+@app.get("/docs/allowed-libraries-versions", summary="Get Allowed Libraries and Versions")
+async def get_allowed_libraries_versions_docs() -> PlainTextResponse:
     """
     Provides a list of allowed Python libraries for code execution.
     Versions should be checked against the project's requirements.txt.
@@ -205,8 +235,6 @@ def get_allowed_libraries_versions_docs():
     # Now derived from the central config
     allowed_third_party_for_docs = list(ALLOWED_THIRD_PARTY_LIBS_CONFIG.values())
     
-    # Attempt to read versions from requirements.txt if possible
-    # This is a simplified parser, assumes format like 'library==version' or 'library'
     versions = {}
     try:
         req_path = os.path.join(os.path.dirname(__file__), "requirements.txt")
@@ -216,13 +244,17 @@ def get_allowed_libraries_versions_docs():
                     line = line.strip()
                     if not line or line.startswith("#"):
                         continue
-                    if "==" in line:
-                        name, version = line.split("==", 1)
-                        versions[name.lower()] = version
-                    else:
-                        versions[line.lower()] = "Not specified (latest or environment default)"
-    except Exception:
-        # Silently ignore errors in reading requirements for this informational resource
+                    # Handles 'library==version', 'library>=version', 'library'
+                    match = re.match(r"^([a-zA-Z0-9_-]+)(?:[<>=!~]=?[\s]*[0-9\.\*a-zA-Z-]+)?", line)
+                    if match:
+                        lib_name = match.group(1).lower()
+                        # Attempt to get full line for version, or mark as "any" or "pinned"
+                        parts = re.split(r"[<>=!~]=", line, 1)
+                        version_str = parts[1].strip() if len(parts) > 1 else "Any version specified or latest"
+                        versions[lib_name] = version_str
+    except Exception as e:
+        logging.error(f"Error reading requirements.txt for docs: {e}", exc_info=True)
+        # Silently ignore errors in reading requirements for this informational resource in terms of response
         pass
 
     doc_content = """# Allowed Python Libraries
@@ -233,13 +265,14 @@ This server allows Python code execution with a restricted set of libraries for 
 """
     for lib_name_display in allowed_third_party_for_docs:
         # Try to find version info
-        # Determine the lookup name for requirements.txt (e.g., "docx" from "docx (for python-docx)")
+        # Determine the lookup name for requirements.txt (e.g., "python-docx" from "docx (for python-docx)")
         if " (for " in lib_name_display:
-            lookup_name = lib_name_display.split(" (for ")[1][:-1].lower() # e.g. python-docx
+            # e.g. "python-docx" from "docx (for python-docx)"
+            lookup_name = lib_name_display.split(" (for ")[1].replace(")", "").strip().lower()
         else:
             lookup_name = lib_name_display.lower()
 
-        version_info = versions.get(lookup_name, "Version not pinned in requirements.txt, check file.")
+        version_info = versions.get(lookup_name, "Version not explicitly pinned in requirements.txt, check file.")
         doc_content += f"- **{lib_name_display}**: `{version_info}`\n"
 
     doc_content += """
@@ -250,11 +283,16 @@ All modules from the Python Standard Library (e.g., `os`, `sys`, `json`, `dateti
 - Ensure your `requirements.txt` file accurately reflects the versions you intend to use for third-party libraries. This documentation provides a general list; `requirements.txt` is the source of truth for exact versions.
 - Code attempting to import unlisted third-party libraries or modules will be rejected by the validation step before execution.
 """
-    return doc_content
+    return PlainTextResponse(content=doc_content)
+
 
 # To run this server (example, not for production directly without a proper ASGI server like Uvicorn/Hypercorn):
-# Needs BUCKET_NAME environment variable or direct assignment above.
-# Example: uvicorn utils:mcp.app --reload
+# Needs GCS_BUCKET_NAME environment variable or direct assignment above.
+# Example: uvicorn utils:app --reload
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    import uvicorn
+    # It's good practice to make host and port configurable, e.g., via environment variables
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)
