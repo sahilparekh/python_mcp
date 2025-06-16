@@ -1,0 +1,9 @@
+fastmcp
+google-cloud-storage
+# Allowed libraries for code execution
+seaborn
+pandas
+openpyxl
+python-docx
+reportlab
+matplotlib

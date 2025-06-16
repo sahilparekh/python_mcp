@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "python-executor": {
+      "command": "python",
+      "args": ["utils.py"],
+      "env": {
+        "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/your/service-account.json"
+      }
+    }
+  }
+}
