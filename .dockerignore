@@ -39,6 +39,8 @@ coverage.xml
 .pytest_cache/
 
 # Environments
+.env
+.env.*
 .venv
 env/
 venv/
@@ -79,11 +81,15 @@ tmp/
 # Docker
 Dockerfile*
 docker-compose*
+docker-build.sh
 .dockerignore
 
 # Documentation (optional - remove if you want docs in container)
 *.md
 docs/
+
+# Deployment scripts
+deploy.sh
 
 # Test files (optional - remove if you want tests in container)
 test_*.py
